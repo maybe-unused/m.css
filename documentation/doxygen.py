@@ -580,7 +580,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                 out.parsed = out.parsed.rstrip()
                 if not out.parsed:
                     out.write_paragraph_start_tag = False
-                elif immediate_parent and immediate_parent.tag == 'listitem' and i.tag in ['itemizedlist', 'orderedlist']:
+                elif immediate_parent is not None and immediate_parent.tag == 'listitem' and i.tag in ['itemizedlist', 'orderedlist']:
                     out.write_paragraph_start_tag = False
                 elif out.write_paragraph_close_tag:
                     out.parsed += '</p>'
@@ -2386,7 +2386,7 @@ def extract_metadata(state: State, xml):
     # Groups are explicitly created so they *have details*, other
     # things need to have at least some documentation. Pages are treated as
     # having something unless they're stupid. See the function for details.
-    compound.has_details = compound.kind == 'group' or compound.brief or compounddef.find('detaileddescription') or (compound.kind == 'page' and not is_a_stupid_empty_markdown_page(compounddef))
+    compound.has_details = compound.kind == 'group' or compound.brief is not None or compounddef.find('detaileddescription') is not None or (compound.kind == 'page' and not is_a_stupid_empty_markdown_page(compounddef))
     compound.children = []
 
     # Version badges, deprecation status. If @since is followed by
@@ -2652,7 +2652,7 @@ def parse_xml(state: State, xml: str):
     # Ignoring compounds w/o any description, except for groups,
     # which are created explicitly. Pages are treated as having something
     # unless they're stupid. See the function for details.
-    if not compounddef.find('briefdescription') and not compounddef.find('detaileddescription') and not compounddef.attrib['kind'] == 'group' and (not compounddef.attrib['kind'] == 'page' or is_a_stupid_empty_markdown_page(compounddef)):
+    if compounddef.find('briefdescription') is None and compounddef.find('detaileddescription') is None and not compounddef.attrib['kind'] == 'group' and (not compounddef.attrib['kind'] == 'page' or is_a_stupid_empty_markdown_page(compounddef)):
         logging.debug("{}: neither brief nor detailed description present, skipping".format(state.current))
         return None
 
@@ -3387,7 +3387,7 @@ def parse_xml(state: State, xml: str):
 
     # Add the compound to search data, if it's documented
     # TODO: add example sources there? how?
-    if not state.config['SEARCH_DISABLED'] and not compound.kind == 'example' and (compound.kind == 'group' or compound.brief or compounddef.find('detaileddescription')):
+    if not state.config['SEARCH_DISABLED'] and not compound.kind == 'example' and (compound.kind == 'group' or compound.brief is not None or compounddef.find('detaileddescription')):
         if compound.kind == 'namespace':
             kind = EntryType.NAMESPACE
         elif compound.kind == 'struct':
@@ -3456,7 +3456,7 @@ def parse_index_xml(state: State, xml):
         entry.id = i.attrib['refid']
 
         # Ignore unknown / undocumented compounds
-        if entry.id not in state.compounds or not state.compounds[entry.id].has_details:
+        if entry.id not in state.compounds or state.compounds[entry.id].has_details is None:
             continue
 
         compound = state.compounds[entry.id]
