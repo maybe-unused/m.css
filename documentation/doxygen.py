@@ -75,6 +75,7 @@ class EntryType(enum.Enum):
     ENUM = 12
     ENUM_VALUE = 13
     VAR = 14
+    CONCEPT = 15
 
 # Order must match the EntryType above
 search_type_map = [
@@ -91,7 +92,8 @@ search_type_map = [
     (CssClass.INFO, "define"),
     (CssClass.PRIMARY, "enum"),
     (CssClass.DEFAULT, "enum val"),
-    (CssClass.DEFAULT, "var")
+    (CssClass.DEFAULT, "var"),
+    (CssClass.PRIMARY, "concept"),
 ]
 
 default_config = {
@@ -286,7 +288,7 @@ def parse_id_and_include(state: State, element: ET.Element) -> Tuple[str, str, s
     # SHOW_INCLUDE_FILES isn't enabled or the file is not documented, this
     # would generate useless empty detailed sections so in that case it's not
     # set.
-    if state.current_kind in ['class', 'struct', 'union']:
+    if state.current_kind in ['class', 'struct', 'union', 'concept']:
         location_attribs = element.find('location').attrib
         file = location_attribs['declfile'] if 'declfile' in location_attribs else location_attribs['file']
         if state.current_include != file:
@@ -345,7 +347,7 @@ def parse_type(state: State, type: ET.Element) -> str:
         if i.tail: out += html.escape(i.tail)
 
     # Remove spacing inside <> and before & and *
-    return fix_type_spacing(out)
+    return fix_type_spacing(out).strip()
 
 def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.Element = None, trim = True, add_css_class = None):
     out = Empty()
@@ -1265,6 +1267,9 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             # Custom mapping of filenames to languages
             mapping = [('.h', 'c++'),
                        ('.h.cmake', 'c++'),
+                       ('.ixx', 'c++'),
+                       ('.hh', 'c++'),
+                       ('.cc', 'c++'),
                        # Pygments knows only .vert, .frag, .geo
                        ('.glsl', 'glsl'),
                        ('.conf', 'ini'),
@@ -1850,6 +1855,9 @@ def parse_inline_desc(state: State, element: ET.Element) -> str:
     return parsed.parsed
 
 def parse_enum(state: State, element: ET.Element):
+    if element.tag != 'memberdef':
+        logging.warning("{}: unexpected tag {} in enum, ignoring".format(state.current, element.tag))
+        return None
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'enum'
 
     enum = Empty()
@@ -1961,6 +1969,9 @@ def parse_template_params(state: State, element: ET.Element, description):
     return has_template_details, templates
 
 def parse_typedef(state: State, element: ET.Element):
+    if element.tag != 'memberdef':
+        logging.warning("{}: unexpected tag {} in typedef, ignoring".format(state.current, element.tag))
+        return None
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'typedef'
 
     typedef = Empty()
@@ -1990,6 +2001,9 @@ def parse_typedef(state: State, element: ET.Element):
     return None
 
 def parse_func(state: State, element: ET.Element):
+    if element.tag != 'memberdef':
+        logging.warning("{}: unexpected tag {} in func, ignoring".format(state.current, element.tag))
+        return None
     assert element.tag == 'memberdef' and element.attrib['kind'] in ['function', 'friend', 'signal', 'slot']
 
     func = Empty()
@@ -2195,23 +2209,34 @@ def parse_func(state: State, element: ET.Element):
     return func if func.brief or can_have_details else None
 
 def parse_var(state: State, element: ET.Element):
+    if element.tag != 'memberdef':
+        logging.warning("{}: unexpected tag {} in var, ignoring".format(state.current, element.tag))
+        return None
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'variable'
 
     var = Empty()
     state.current_definition_url_base, var.base_url, var.id, var.include, var.has_details = parse_id_and_include(state, element)
-    var.type = parse_type(state, element.find('type'))
-    if var.type.startswith('constexpr'):
-        var.type = var.type[10:]
-        var.is_constexpr = True
-    else:
-        var.is_constexpr = False
-    var.is_static = element.attrib['static'] == 'yes'
     var.is_protected = element.attrib['prot'] == 'protected'
     var.is_private = element.attrib['prot'] == 'private'
     var.name = element.find('name').text
     var.brief = parse_desc(state, element.find('briefdescription'))
     var.description, templates, search_keywords, var.deprecated, var.since = parse_var_desc(state, element)
     var.has_template_details, var.templates = parse_template_params(state, element.find('templateparamlist'), templates)
+
+    var.type = parse_type(state, element.find('type'))
+    matched_keyword = True
+    while matched_keyword:
+        matched_keyword = False
+        for kw in ('static', 'constexpr', 'constinit'):
+            if var.type.startswith(kw + ' '):
+                var.type = var.type[len(kw):].strip()
+            elif var.type.endswith(' ' + kw):
+                var.type = var.type[:len(kw)].strip()
+            else: continue
+            matched_keyword = True
+            setattr(var, 'is_' + kw, True)
+    for kw in ('constexpr', 'constinit', 'static'):
+        setattr(var, 'is_' + kw, getattr(var, 'is_' + kw, False) or (kw in element.attrib and element.attrib[kw] == 'yes'))
 
     if var.base_url == state.current_compound_url and (var.description or var.has_template_details):
         var.has_details = True # has_details might already be True from above
@@ -2337,7 +2362,7 @@ def extract_metadata(state: State, xml):
         return
     assert len([i for i in root]) == 1
 
-    if compounddef.attrib['kind'] not in ['namespace', 'group', 'class', 'struct', 'union', 'dir', 'file', 'page']:
+    if compounddef.attrib['kind'] not in ['namespace', 'group', 'class', 'struct', 'union', 'dir', 'file', 'page', 'concept']:
         logging.debug("No useful info in {}, skipping".format(state.current))
         return
 
@@ -2394,7 +2419,7 @@ def extract_metadata(state: State, xml):
     if compound.kind in ['struct', 'class', 'union']:
         compound.is_final = compounddef.attrib.get('final') == 'yes'
 
-    if compound.kind in ['class', 'struct', 'union']:
+    if compound.kind in ['class', 'struct', 'union', 'concept']:
         # Fix type spacing
         compound.name = fix_type_spacing(compound.name)
 
@@ -2407,6 +2432,8 @@ def extract_metadata(state: State, xml):
         for i in compounddef.findall('innerclass'):
             compound.children += [i.attrib['refid']]
         for i in compounddef.findall('innernamespace'):
+            compound.children += [i.attrib['refid']]
+        for i in compounddef.findall('innerconcept'):
             compound.children += [i.attrib['refid']]
     elif compounddef.attrib['kind'] in ['dir', 'file']:
         for i in compounddef.findall('innerdir'):
@@ -2436,8 +2463,9 @@ def postprocess_state(state: State):
             continue
 
         # Strip parent namespace/class from symbol name
-        if compound.kind in ['namespace', 'struct', 'class', 'union']:
+        if compound.kind in ['namespace', 'struct', 'class', 'union', 'concept']:
             prefix = state.compounds[compound.parent].name + '::'
+            # print(prefix, compound.name)
             assert compound.name.startswith(prefix)
             compound.leaf_name = compound.name[len(prefix):]
 
@@ -2506,7 +2534,7 @@ def build_search_data(state: State, merge_subtrees=True, add_lookahead_barriers=
         # Decide on prefix joiner. Defines are among the :: ones as well,
         # because we need to add the function macros twice -- but they have no
         # prefix, so it's okay.
-        if EntryType(result.flags.type) in [EntryType.NAMESPACE, EntryType.CLASS, EntryType.STRUCT, EntryType.UNION, EntryType.TYPEDEF, EntryType.FUNC, EntryType.VAR, EntryType.ENUM, EntryType.ENUM_VALUE, EntryType.DEFINE]:
+        if EntryType(result.flags.type) in [EntryType.NAMESPACE, EntryType.CLASS, EntryType.STRUCT, EntryType.UNION, EntryType.TYPEDEF, EntryType.FUNC, EntryType.VAR, EntryType.ENUM, EntryType.ENUM_VALUE, EntryType.DEFINE, EntryType.CONCEPT]:
             joiner = '::'
         elif EntryType(result.flags.type) in [EntryType.DIR, EntryType.FILE]:
             joiner = '/'
@@ -2610,8 +2638,8 @@ def parse_xml(state: State, xml: str):
 
     assert len([i for i in root]) == 1
 
-    # Ignoring private structs/classes and unnamed namespaces
-    if ((compounddef.attrib['kind'] in ['struct', 'class', 'union'] and compounddef.attrib['prot'] == 'private') or
+    # Ignoring private structs/classes/concepts and unnamed namespaces
+    if ((compounddef.attrib['kind'] in ['struct', 'class', 'union', 'concept'] and 'prot' in compounddef.attrib and compounddef.attrib['prot'] == 'private') or
         (compounddef.attrib['kind'] == 'namespace' and '@' in compounddef.find('compoundname').text)):
         logging.debug("{}: only private things, skipping".format(state.current))
         return None
@@ -2658,6 +2686,7 @@ def parse_xml(state: State, xml: str):
     compound.files = []
     compound.namespaces = []
     compound.classes = []
+    compound.concepts = []
     compound.base_classes = []
     compound.derived_classes = []
     compound.enums = []
@@ -2692,7 +2721,7 @@ def parse_xml(state: State, xml: str):
 
     # Build breadcrumb. Breadcrumb for example pages is built after everything
     # is parsed.
-    if compound.kind in ['namespace', 'group', 'struct', 'class', 'union', 'file', 'dir', 'page']:
+    if compound.kind in ['namespace', 'group', 'struct', 'class', 'union', 'file', 'dir', 'page', 'concept']:
         # Gather parent compounds
         path_reverse = [compound.id]
         while path_reverse[-1] in state.compounds and state.compounds[path_reverse[-1]].parent:
@@ -2716,10 +2745,10 @@ def parse_xml(state: State, xml: str):
     if compound.kind in ['struct', 'class', 'union']:
         compound.is_final = compounddef.attrib.get('final') == 'yes'
 
-    # Decide about the include file for this compound. Classes get it always,
+    # Decide about the include file for this compound. Classes and concepts get it always,
     # namespaces without any members too.
     state.current_kind = compound.kind
-    if compound.kind in ['struct', 'class', 'union'] or (compound.kind == 'namespace' and compounddef.find('innerclass') is None and compounddef.find('innernamespace') is None and compounddef.find('sectiondef') is None):
+    if compound.kind in ['struct', 'class', 'union', 'concept'] or (compound.kind == 'namespace' and compounddef.find('innerclass') is None and compounddef.find('innernamespace') is None and compounddef.find('sectiondef') is None):
         location_attribs = compounddef.find('location').attrib
         file = location_attribs['declfile'] if 'declfile' in location_attribs else location_attribs['file']
         compound.include = make_include(state, file)
@@ -2743,7 +2772,7 @@ def parse_xml(state: State, xml: str):
     # it and resets to None in case the include differs for given entry,
     # meaning all entries need to have their own include definition instead.
     # That's then finally reflected in has_details of each entry.
-    elif compound.kind == 'namespace' and compounddef.find('innerclass') is None and compounddef.find('innernamespace') is None:
+    elif compound.kind == 'namespace' and compounddef.find('innerclass') is None and compounddef.find('innernamespace') is None and compounddef.find('innerconcept') is None:
         state.current_include = ''
 
     # Files and dirs don't need it (it's implicit); and it makes no sense for
@@ -2816,7 +2845,7 @@ def parse_xml(state: State, xml: str):
                     compound.files += [f]
 
         # Namespace / class
-        elif compounddef_child.tag in ['innernamespace', 'innerclass']:
+        elif compounddef_child.tag in ['innernamespace', 'innerclass', 'innerconcept']:
             id = compounddef_child.attrib['refid']
 
             # Add it only if it's not private and we have documentation for it
@@ -2836,30 +2865,34 @@ def parse_xml(state: State, xml: str):
                     compound.namespaces += [namespace]
 
                 else:
-                    assert compounddef_child.tag == 'innerclass'
+                    assert compounddef_child.tag in ('innerconcept', 'innerclass')
 
-                    class_ = Empty()
-                    class_.kind = symbol.kind
-                    class_.url = symbol.url
+                    child_type = Empty()
+                    child_type.kind = symbol.kind
+                    child_type.url = symbol.url
                     # Use the full name if this is a file or group (where the
                     # hierarchy isn't implicit like with namespace or class)
-                    class_.name = symbol.leaf_name if compound.kind in ['namespace', 'class', 'struct', 'union'] else symbol.name
-                    class_.brief = symbol.brief
-                    class_.deprecated = symbol.deprecated
-                    class_.since = symbol.since
-                    class_.templates = symbol.templates
+                    child_type.name = symbol.leaf_name if compound.kind in ['namespace', 'class', 'struct', 'union'] else symbol.name
+                    child_type.brief = symbol.brief
+                    child_type.deprecated = symbol.deprecated
+                    child_type.since = symbol.since
+                    child_type.templates = symbol.templates
 
-                    # Put classes into the public/protected section for
-                    # inner classes
-                    if compound.kind in ['class', 'struct', 'union']:
+                    # Put classes and concepts into the public/protected section for
+                    # inner types
+                    if compound.kind in ['class', 'struct', 'union', 'concept']:
+                        inner_section = 'concept' if symbol.kind == 'concept' else 'class'
                         if compounddef_child.attrib['prot'] == 'public':
-                            compound.public_types += [('class', class_)]
+                            compound.public_types += [(inner_section, child_type)]
                         else:
                             assert compounddef_child.attrib['prot'] == 'protected'
-                            compound.protected_types += [('class', class_)]
+                            compound.protected_types += [(inner_section, child_type)]
                     else:
                         assert compound.kind in ['namespace', 'group', 'file']
-                        compound.classes += [class_]
+                        if symbol.kind == 'concept':
+                            compound.concepts += [child_type]
+                        else:
+                            compound.classes += [child_type]
 
         # Base class (if it links to anywhere)
         elif compounddef_child.tag == 'basecompoundref':
@@ -3219,6 +3252,7 @@ def parse_xml(state: State, xml: str):
                                             'detaileddescription', # handled above
                                             'innerpage', # doesn't add anything to output
                                             'location', # handled above
+                                            'initializer', # handled above
                                             'includes',
                                             'includedby',
                                             'incdepgraph',
@@ -3232,7 +3266,7 @@ def parse_xml(state: State, xml: str):
 
     # Decide about the prefix (it may contain template parameters, so we
     # had to wait until everything is parsed)
-    if compound.kind in ['namespace', 'struct', 'class', 'union']:
+    if compound.kind in ['namespace', 'struct', 'class', 'union', 'concept']:
         # The name itself can contain templates (e.g. a specialized template),
         # so properly escape and fix spacing there as well
         compound.prefix_wbr = add_wbr(fix_type_spacing(html.escape(compound.name)))
@@ -3370,7 +3404,11 @@ def parse_xml(state: State, xml: str):
             kind = EntryType.PAGE
         elif compound.kind == 'group':
             kind = EntryType.GROUP
-        else: assert False # pragma: no cover
+        elif compound.kind == 'concept':
+            kind = EntryType.CONCEPT
+        else:
+            logging.error("Unknown compound kind: {}".format(compound.kind)) 
+            assert False # pragma: no cover
 
         result = Empty()
         result.flags = ResultFlag.from_type(ResultFlag.DEPRECATED if compound.deprecated else ResultFlag(0), kind)
@@ -3400,6 +3438,7 @@ def parse_index_xml(state: State, xml):
     top_level_files = []
     top_level_pages = []
     top_level_modules = []
+    top_level_concepts = []
 
     # Non-top-level symbols, files and pages, assigned later
     orphans_nestable = {}
@@ -3429,6 +3468,8 @@ def parse_index_xml(state: State, xml):
         entry.deprecated = compound.deprecated
         entry.since = compound.since
         entry.has_nestable_children = False
+        entry.has_class_descendents = compound.kind in ('class', 'struct', 'union')
+        entry.has_concept_descendents = compound.kind == 'concept'
         if compound.kind == 'namespace':
             entry.is_inline = compound.is_inline
         if compound.kind in ['class', 'struct', 'union']:
@@ -3446,6 +3487,8 @@ def parse_index_xml(state: State, xml):
                 top_level_dirs += [entry]
             elif compound.kind == 'file':
                 top_level_files += [entry]
+            elif compound.kind == 'concept':
+                top_level_concepts += [entry]
             else:
                 assert compound.kind == 'page'
                 # Ignore index page in page listing, add it later only if it
@@ -3463,7 +3506,7 @@ def parse_index_xml(state: State, xml):
                     orphan_pages[compound.parent] = {}
                 orphan_pages[compound.parent][entry.id] = entry
             else:
-                assert compound.kind in ['class', 'struct', 'union', 'file']
+                assert compound.kind in ['class', 'struct', 'union', 'file', 'concept']
                 if not compound.parent in orphans:
                     orphans[compound.parent] = []
                 orphans[compound.parent] += [entry]
@@ -3477,7 +3520,7 @@ def parse_index_xml(state: State, xml):
     parsed = Empty()
     parsed.version = root.attrib['version']
     parsed.index = Empty()
-    parsed.index.symbols = top_level_namespaces + top_level_classes
+    parsed.index.symbols = top_level_namespaces + top_level_classes + top_level_concepts
     parsed.index.files = top_level_dirs + top_level_files
     parsed.index.pages = top_level_pages
     parsed.index.modules = top_level_modules
@@ -3503,6 +3546,18 @@ def parse_index_xml(state: State, xml):
     # Add the index page if it has children
     if 'indexpage' in entries and entries['indexpage'].children:
         parsed.index.pages = [entries['indexpage']] + parsed.index.pages
+
+    # Resolve has_(class|concept)_descendents
+    def resolve_typed_decendents_flag(root, flag):
+        assert root is not None
+        flag_value = getattr(root, f'has_{flag}_descendents')
+        for child in root.children:
+            resolve_typed_decendents_flag(child, flag)
+            flag_value = flag_value or getattr(child, f'has_{flag}_descendents')
+        setattr(root, f'has_{flag}_descendents', flag_value)
+    for symbol in parsed.index.symbols:
+        resolve_typed_decendents_flag(symbol, 'class')
+        resolve_typed_decendents_flag(symbol, 'concept')
 
     return parsed
 
@@ -3698,7 +3753,8 @@ def parse_doxyfile(state: State, doxyfile, values = None):
         'namespaces': ("Namespaces", 'namespaces.html'),
         'modules': ("Modules", 'modules.html'),
         'annotated': ("Classes", 'annotated.html'),
-        'files': ("Files", 'files.html')
+        'files': ("Files", 'files.html'),
+        'concepts': ("Concepts", 'concepts.html'),
     }
     def extract_link(link):
         # If this is a HTML code, return it as a one-item tuple
@@ -3787,7 +3843,7 @@ def parse_doxyfile(state: State, doxyfile, values = None):
         logging.fatal("{}: CREATE_SUBDIRS is not supported, sorry. Disable it and try again.".format(doxyfile))
         raise NotImplementedError
 
-default_index_pages = ['pages', 'files', 'namespaces', 'modules', 'annotated']
+default_index_pages = ['pages', 'files', 'namespaces', 'modules', 'annotated', 'concepts']
 default_wildcard = '*.xml'
 default_templates = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates/doxygen/')
 
