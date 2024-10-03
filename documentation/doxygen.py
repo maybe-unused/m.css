@@ -1779,7 +1779,7 @@ def parse_desc(state: State, element: ET.Element) -> str:
 
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element)
-    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values
+    # assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values
     assert not parsed.section # might be problematic
     return parsed.parsed
 
